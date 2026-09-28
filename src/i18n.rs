@@ -62,6 +62,30 @@ impl Language {
             "Artwork" => "卡面图片",
             "Preview" => "预览",
             "Refresh" => "刷新",
+            "Rename card" => "重命名卡片",
+            "Rename device" => "重命名设备",
+            "Device name" => "设备名称",
+            "This name is only used in AirCard. The iPhone name and its UDID stay unchanged." => "名称仅用于 AirCard，不会更改 iPhone 系统名称或 UDID。",
+            "Delete local card record…" => "删除本地卡片记录…",
+            "Card name" => "卡片名称",
+            "Give this card a name. Its artwork and history stay unchanged." => "为卡片命名，不会改变卡面或历史记录。",
+            "Delete phone record?" => "删除手机记录？",
+            "Delete card record?" => "删除卡片记录？",
+            "Delete artwork record?" => "删除卡面记录？",
+            "All local cards, ORIGIN images and artwork history on this phone will be removed. This cannot be undone. The iPhone is not changed." => "将删除这部手机的所有本地卡片、ORIGIN 图片和卡面历史，无法撤销。不会更改 iPhone。",
+            "All local history for this card, including ORIGIN, will be removed. This cannot be undone. The iPhone is not changed." => "将删除这张卡片的全部本地历史，包括 ORIGIN，无法撤销。不会更改 iPhone。",
+            "Only the selected local artwork record will be removed. ORIGIN stays protected. The iPhone is not changed." => "仅删除选中的本地卡面记录，ORIGIN 保留。不会更改 iPhone。",
+            "Save" => "保存",
+            "Delete" => "删除",
+            "Original artwork cannot be deleted" => "不可删除原始卡面",
+            "Open Wallet · tap a card" => "打开钱包 · 点选卡片",
+            "Keep iPhone connected until completion." => "完成前请保持 iPhone 连接。",
+            "Preparing and backing up card artwork..." => "正在准备并备份卡面…",
+            "Preparing original card artwork..." => "正在准备原始卡面…",
+            "Writing card artwork assets..." => "正在写入卡面…",
+            "Restoring original card artwork..." => "正在还原卡面…",
+            "Device cleanup finished; saving local history..." => "手机清理已完成，正在保存本地记录…",
+            "Device cleanup finished; finalizing restore..." => "手机清理已完成，正在完成还原…",
             "Auto (USB preferred)" => "自动（优先 USB）",
             "USB only" => "仅 USB",
             "WiFi only" => "仅 WiFi",
@@ -72,6 +96,10 @@ impl Language {
             "Logs" => "日志",
             "Logs [x]" => "日志 [x]",
             "Copy Logs" => "复制日志",
+            "Copied" => "已复制",
+            "Follow latest" => "跟随最新日志",
+            "Close" => "关闭",
+            "Offline" => "离线",
             "Save to File..." => "保存到文件...",
             "Clear" => "清空",
             "No events logged yet." => "暂无日志记录。",
@@ -96,7 +124,6 @@ impl Language {
             "Card skin written without original backup; restore is unavailable. Force quit Wallet and reopen it." => "卡面已写入，但无法读取原卡面备份，因此不能恢复原卡面。请强制关闭并重新打开 Wallet。",
             "Card skin updated successfully!" => "卡片皮肤更新成功！",
             "Restoring original card face..." => "正在恢复原卡面...",
-            "Restoring original card artwork..." => "正在恢复原卡面图片...",
             "Clearing .cache cache..." => "正在清理 .cache 缓存...",
             "Clearing .pkcache cache..." => "正在清理 .pkcache 缓存...",
             "Original card face restored successfully!" => "原卡面恢复成功！",
@@ -115,7 +142,24 @@ impl Language {
             "Open Wallet on iPhone and tap your card" => "请在 iPhone 上打开钱包并点击目标卡片",
             "Stop" => "停止",
             "Scan" => "扫描",
+            "Target Card" => "目标卡片",
             "Target Card Hash" => "目标卡片 Hash",
+            "Current card · device read" => "当前卡面 · 从手机读取",
+            "New artwork" => "新卡面",
+            "Show new artwork" => "查看新卡面",
+            "Show current card" => "查看当前卡面",
+            "Current card face loaded." => "当前卡面已读取。",
+            "Current card artwork is unavailable." => "无法读取当前卡面。",
+            "Reading current card artwork..." => "正在读取当前卡面…",
+            "Card preview ready; restoring device file..." => "卡面预览已就绪，正在写回手机文件…",
+            "Cached preview; refreshing from iPhone..." => "已显示缓存预览，正在从手机更新…",
+            "Preparing image..." => "正在准备图片…",
+            "Refreshing..." => "正在更新…",
+            "Apply accepted; finishing the current read safely..." => "已接受写入，正在安全结束当前读取…",
+            "Apply queued" => "已安排写入",
+            "Wait for the current card read to finish." => "请等待当前卡面读取完成。",
+            "CoreFP is not ready. Refresh devices and approve the permission prompt." => "CoreFP 尚未就绪，请刷新设备并允许权限提示。",
+            "Wait for the device operation to finish before closing AirCard." => "请等待手机操作完成后再关闭 AirCard。",
             "Base64 pass hash..." => "Base64 卡片 Hash...",
             "Saved cards" => "已保存的卡片",
             "Changed cards on this iPhone" => "这台 iPhone 已修改的卡片",
@@ -148,11 +192,9 @@ impl Language {
     }
 
     pub fn option_label(self, option: Self) -> &'static str {
-        match (self, option) {
-            (Self::English, Self::English) => "English",
-            (Self::English, Self::SimplifiedChinese) => "Simplified Chinese",
-            (Self::SimplifiedChinese, Self::English) => "英语",
-            (Self::SimplifiedChinese, Self::SimplifiedChinese) => "简体中文",
+        match option {
+            Self::English => "English",
+            Self::SimplifiedChinese => "简体中文",
         }
     }
 }
@@ -180,14 +222,15 @@ mod tests {
     }
 
     #[test]
-    fn language_option_labels_follow_current_language() {
+    fn language_option_labels_use_native_names() {
         assert_eq!(
             Language::English.option_label(Language::SimplifiedChinese),
-            "Simplified Chinese"
+            "简体中文"
         );
         assert_eq!(
             Language::SimplifiedChinese.option_label(Language::SimplifiedChinese),
             "简体中文"
         );
+        assert_eq!(Language::SimplifiedChinese.option_label(Language::English), "English");
     }
 }

@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 
-use crate::airlift_read::read_system_file;
+use crate::airlift_read::{read_system_file, read_system_file_with_preview};
 use crate::device::ConnectionMode;
 
 pub const CARD_ARTWORK_ASSETS: [&str; 3] = [
@@ -80,6 +81,55 @@ fn card_hash_candidates(card_hash: &str) -> Vec<String> {
     }
     candidates.dedup();
     candidates
+}
+
+pub fn read_current_card_face<L, P>(
+    udid: &str,
+    connection_mode: ConnectionMode,
+    card_hash: &str,
+    mut log: L,
+    mut preview: P,
+    cancel: &AtomicBool,
+) -> Result<Option<Vec<u8>>>
+where
+    L: FnMut(&str),
+    P: FnMut(&[u8]),
+{
+    let dir = backup_dir(udid, card_hash);
+    let assets = preview_asset_order(dir.join("cardBackgroundCombined@2x.png").is_file(),
+        dir.join("cardBackgroundCombined@3x.png").is_file());
+    for hash in card_hash_candidates(card_hash) {
+        let directory = format!("/var/mobile/Library/Passes/Cards/{hash}.pkpass");
+        for asset in assets {
+            if cancel.load(Ordering::Relaxed) { return Ok(None); }
+            log(&format!("Reading preview asset: {asset}"));
+            if let Some(bytes) = read_system_file_with_preview(udid, connection_mode, &directory, asset, &mut log, &mut preview, Some(cancel))? {
+                image::load_from_memory(&bytes).context("Current card artwork is not a valid image")?;
+                return Ok(Some(bytes));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn preview_asset_order(has_2x: bool, has_3x: bool) -> [&'static str; 2] {
+    if has_3x && !has_2x {
+        ["cardBackgroundCombined@3x.png", "cardBackgroundCombined@2x.png"]
+    } else {
+        ["cardBackgroundCombined@2x.png", "cardBackgroundCombined@3x.png"]
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_prefers_a_known_existing_asset_or_smaller_default() {
+        assert!(preview_asset_order(false, false)[0].contains("@2x"));
+        assert!(preview_asset_order(true, true)[0].contains("@2x"));
+        assert!(preview_asset_order(false, true)[0].contains("@3x"));
+    }
 }
 
 pub fn capture_original_card<L>(

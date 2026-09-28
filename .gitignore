@@ -9,6 +9,7 @@ target/
 *.dll
 AppleSupport/
 AirCard-Windows-portable.zip
+AirCard-Windows.zip
 .cargo-home/
 Data/
 

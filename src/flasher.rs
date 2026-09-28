@@ -61,6 +61,26 @@ pub fn write_system_file<L>(
 where
     L: FnMut(&str),
 {
+    log(&format!("Connecting AFC for {}...", leaf_name));
+    let session = ActiveDeviceSession::open(Some(udid), connection_mode)
+        .context("Failed to open device session for writing")?;
+    log(&format!("Connected over {}.", session.transport.label()));
+    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
+    write_system_file_in_session(&session, &afc, target_dir, leaf_name, payload, log)
+}
+
+pub(crate) fn write_system_file_in_session<L>(
+    session: &ActiveDeviceSession,
+    afc: &AfcClient,
+    target_dir: &str,
+    leaf_name: &str,
+    payload: &[u8],
+    mut log: L,
+) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    let udid = session.udid.as_str();
     let token = generate_token();
     let source = format!("{}{}", SOURCE_PREFIX, token);
     let link_dest = format!("{}{}", LINK_PREFIX, token);
@@ -76,13 +96,7 @@ where
         (payload_ident.as_str(), target_dest.as_str()),
     ];
 
-    log(&format!("Connecting AFC for {}...", leaf_name));
-    let session = ActiveDeviceSession::open(Some(udid), connection_mode)
-        .context("Failed to open device session for writing")?;
-    log(&format!("Connected over {}.", session.transport.label()));
-    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
-
-    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before staging")?;
+    let snapshot = snapshot_books(afc).context("Failed to snapshot Books state before staging")?;
 
     let archive_data = build_streaming_zip_archive(target_dir, payload)
         .context("Failed to build streaming zip archive")?;
@@ -92,7 +106,7 @@ where
 
     let write_res = (|| -> Result<()> {
         log(&format!("Staging payload archive ({} bytes) via MobileInstallation...", archive_data.len()));
-        stage_streaming_zip(&session, &source, &archive_data)
+        stage_streaming_zip(session, &source, &archive_data)
             .context("Failed to stage streaming zip conduit")?;
 
         let link_obj = format!("{}/p0/p1/p2/link", source);
@@ -119,7 +133,7 @@ where
     let _ = afc.remove_tree(&source);
     sleep(Duration::from_millis(800));
 
-    let restore_res = restore_books(&afc, &snapshot);
+    let restore_res = restore_books(afc, &snapshot);
 
     write_res?;
     restore_res.context("Failed to restore Books state during cleanup")?;
@@ -232,6 +246,9 @@ pub struct FlashOutcome {
     pub original_backed_up: bool,
 }
 
+// Progress counts completed phases; the final phase is completed by the UI worker.
+pub const WALLET_WRITE_PHASES: usize = 5;
+
 pub fn flash_wallet_skin<F, L>(
     udid: &str,
     connection_mode: ConnectionMode,
@@ -256,6 +273,7 @@ where
         skin_png.len(),
         skin_pdf.len()
     ));
+    progress(0, WALLET_WRITE_PHASES, "Preparing and backing up card artwork...");
     let resolved_hash = match capture_original_card(udid, connection_mode, card_hash, &mut log) {
         Ok(Some(hash)) => hash,
         Ok(None) => card_hash.to_string(),
@@ -270,13 +288,12 @@ where
     }
     let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", resolved_hash);
 
-    let total_steps = 3;
-    progress(1, total_steps, "Writing card artwork assets...");
+    progress(1, WALLET_WRITE_PHASES, "Writing card artwork assets...");
     let asset_names: Vec<&str> = match original_assets.as_ref() {
         Some(assets) => assets.iter().map(|(name, _)| name.as_str()).collect(),
         None => TARGET_WALLET_ASSETS.to_vec(),
     };
-    log(&format!("[1/3] Writing {} card artwork asset(s)...", asset_names.len()));
+    log(&format!("Writing {} card artwork asset(s)...", asset_names.len()));
     let card_assets: Vec<(&str, &[u8])> = asset_names.iter().map(|name| {
         (*name, if name.ends_with(".pdf") { skin_pdf } else { skin_png })
     }).collect();
@@ -301,9 +318,9 @@ where
         resolved_hash.as_str(),
         &mut progress,
         &mut log,
-    );
+    )?;
 
-    progress(total_steps, total_steps, "Card skin updated successfully!");
+    progress(4, WALLET_WRITE_PHASES, "Device cleanup finished; saving local history...");
     log("Card skin write finished! Close and reopen Wallet on iPhone to view.");
     Ok(FlashOutcome { device_hash: resolved_hash, original_backed_up })
 }
@@ -324,6 +341,7 @@ where
         crate::scanner::is_valid_card_hash(card_hash) && crate::scanner::is_valid_card_hash(device_hash),
         "Invalid Wallet card path identifier"
     );
+    progress(0, WALLET_WRITE_PHASES, "Preparing original card artwork...");
     let original_assets = load_original_assets(udid, card_hash)
         .context("Could not load the original Wallet card face backup")?;
     let asset_refs: Vec<(&str, &[u8])> = original_assets
@@ -336,7 +354,7 @@ where
         asset_refs.len(),
         card_hash
     ));
-    progress(1, 3, "Restoring original card artwork...");
+    progress(1, WALLET_WRITE_PHASES, "Restoring original card artwork...");
 
     let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", device_hash);
     if let Err(err) = write_system_files_batch(
@@ -369,9 +387,9 @@ where
         device_hash,
         &mut progress,
         &mut log,
-    );
+    )?;
 
-    progress(3, 3, "Original card face restored successfully!");
+    progress(4, WALLET_WRITE_PHASES, "Device cleanup finished; finalizing restore...");
     log("Original card face restored. Close and reopen Wallet on iPhone to view it.");
     Ok(())
 }
@@ -382,7 +400,7 @@ fn invalidate_wallet_caches<F, L>(
     card_hash: &str,
     progress: &mut F,
     log: &mut L,
-) where
+) -> Result<()> where
     F: FnMut(usize, usize, &str),
     L: FnMut(&str),
 {
@@ -395,10 +413,10 @@ fn invalidate_wallet_caches<F, L>(
     for (c_idx, ext) in [".cache", ".pkcache"].iter().enumerate() {
         let step = 2 + c_idx;
         let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
-        progress(step, 3, &format!("Clearing {} cache...", ext));
+        progress(step, WALLET_WRITE_PHASES, &format!("Clearing {} cache...", ext));
         log(&format!(
-            "[{}/3] Invalidating cache leaves in {}...",
-            step, cache_dir
+            "[completed {}/{}] Invalidating cache leaves in {}...",
+            step, WALLET_WRITE_PHASES, cache_dir
         ));
 
         if write_system_files_batch(
@@ -411,15 +429,16 @@ fn invalidate_wallet_caches<F, L>(
         .is_err()
         {
             for (leaf, data) in &cache_leaves {
-                let _ = write_system_file(
+                write_system_file(
                     udid,
                     connection_mode,
                     &cache_dir,
                     leaf,
                     data,
                     &mut *log,
-                );
+                ).with_context(|| format!("Card artwork changed, but cache cleanup failed: {cache_dir}/{leaf}"))?;
             }
         }
     }
+    Ok(())
 }

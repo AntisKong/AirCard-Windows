@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -182,6 +181,27 @@ pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
     None
 }
 
+#[derive(Default)]
+struct CardDiscovery {
+    hash: String,
+    name: String,
+    last_seen: Option<std::time::Instant>,
+}
+
+impl CardDiscovery {
+    fn accept(&mut self, hash: &str, name: &str, now: std::time::Instant) -> bool {
+        let changed = self.hash != hash;
+        let improved_name = !name.is_empty() && self.name != name;
+        let new_event = self.last_seen.is_none_or(|previous|
+            now.saturating_duration_since(previous) >= std::time::Duration::from_millis(750));
+        if changed { self.name.clear(); }
+        self.hash = hash.to_string();
+        if !name.is_empty() { self.name = name.to_string(); }
+        self.last_seen = Some(now);
+        changed || improved_name || new_event
+    }
+}
+
 pub fn scan_syslog_for_cards<F, L>(
     udid: Option<&str>,
     connection_mode: ConnectionMode,
@@ -230,7 +250,7 @@ where
 
     let mut buffer = [0u8; 8192];
     let mut line_acc = Vec::with_capacity(1024);
-    let mut seen_cards: HashMap<String, String> = HashMap::new();
+    let mut discovery = CardDiscovery::default();
 
     while !stop_flag.load(Ordering::Relaxed) {
         let bytes_read = unsafe {
@@ -249,12 +269,7 @@ where
                         let line = String::from_utf8_lossy(&line_acc);
                         if let Some(hash) = extract_card_hash_from_line(&line) {
                             let name = extract_card_name_from_line(&line).unwrap_or_default();
-                            let new_or_better_name = match seen_cards.get(&hash) {
-                                None => true,
-                                Some(previous) => previous.is_empty() && !name.is_empty(),
-                            };
-                            if new_or_better_name {
-                                seen_cards.insert(hash.clone(), name.clone());
+                            if discovery.accept(&hash, &name, std::time::Instant::now()) {
                                 log(format!(
                                     "Found card pass! Name: '{}', Hash: {}",
                                     if name.is_empty() { "Unknown" } else { &name },
@@ -289,6 +304,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_tracks_revisited_cards_and_filters_log_bursts() {
+        let mut discovery = CardDiscovery::default();
+        let now = std::time::Instant::now();
+        assert!(discovery.accept("A", "", now));
+        assert!(!discovery.accept("A", "", now + std::time::Duration::from_millis(10)));
+        assert!(discovery.accept("A", "Card A", now + std::time::Duration::from_millis(20)));
+        assert!(!discovery.accept("A", "", now + std::time::Duration::from_millis(30)));
+        assert!(discovery.accept("B", "", now + std::time::Duration::from_millis(40)));
+        assert!(discovery.accept("A", "", now + std::time::Duration::from_millis(50)));
+        assert!(discovery.accept("A", "", now + std::time::Duration::from_secs(2)));
+    }
 
     #[test]
     fn test_extract_card_hash() {

@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -14,7 +15,7 @@ use crate::airlift::{
 };
 use crate::airtraffic::sync_assets_via_airtraffic;
 use crate::device::{ActiveDeviceSession, ConnectionMode};
-use crate::flasher::{generate_token, write_system_file};
+use crate::flasher::{generate_token, write_system_file_in_session};
 
 const AIRLOCK_ROOT: &str = "/var/mobile/Media/Airlock/Book";
 const MAX_READ_SIZE: usize = 32 * 1024 * 1024;
@@ -68,11 +69,30 @@ pub fn read_system_file<L>(
     mode: ConnectionMode,
     target_dir: &str,
     leaf: &str,
-    mut log: L,
+    log: L,
 ) -> Result<Option<Vec<u8>>>
 where
     L: FnMut(&str),
 {
+    read_system_file_with_preview(udid, mode, target_dir, leaf, log, |_| {}, None)
+}
+
+pub fn read_system_file_with_preview<L, P>(
+    udid: &str,
+    mode: ConnectionMode,
+    target_dir: &str,
+    leaf: &str,
+    mut log: L,
+    mut preview: P,
+    cancel: Option<&AtomicBool>,
+) -> Result<Option<Vec<u8>>>
+where
+    L: FnMut(&str),
+    P: FnMut(&[u8]),
+{
+    let started = std::time::Instant::now();
+    let cancelled = || cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
+    if cancelled() { return Ok(None); }
     let target_ident = relative_identifier(target_dir, leaf)?;
     let token = generate_token();
     let source = format!("{SOURCE_PREFIX}{token}");
@@ -105,6 +125,13 @@ where
         if clean_stage(&afc, &snapshot, &source, &link).is_ok() { let _ = fs::remove_dir_all(&journal); }
         return Err(err).context("Cannot stage Books metadata; Wallet file was not moved");
     }
+    if cancelled() {
+        clean_stage(&afc, &snapshot, &source, &link)
+            .context("Could not clean cancelled artwork staging; Wallet file was not moved")?;
+        fs::remove_dir_all(&journal).context("Cannot remove cancelled recovery snapshot")?;
+        log("Preview read cancelled before exporting the Wallet file.");
+        return Ok(None);
+    }
     let sync_result = sync_assets_via_airtraffic(
         udid, session.transport,
         &[(link_ident.as_str(), link.as_str()), (target_ident.as_str(), recovered.as_str())],
@@ -125,6 +152,8 @@ where
         }
         return Ok(None);
     }
+
+    log(&format!("Artwork export ready after {:.2}s; reading file bytes...", started.elapsed().as_secs_f32()));
 
     // From this point the source may have been moved off its original path.
     // Never delete Media/recovered until write-back has reported success.
@@ -148,7 +177,11 @@ where
             ));
         }
     };
-    if let Err(err) = write_system_file(udid, mode, target_dir, leaf, &bytes, &mut log) {
+    log(&format!("Artwork bytes received after {:.2}s; restoring device file...", started.elapsed().as_secs_f32()));
+    if !cancelled() && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| preview(&bytes))).is_err() {
+        log("Preview callback failed; continuing mandatory device write-back.");
+    }
+    if let Err(err) = write_system_file_in_session(&session, &afc, target_dir, leaf, &bytes, &mut log) {
         let _ = restore_books(&afc, &snapshot);
         return Err(err).with_context(|| format!(
             "Write-back uncertain. Do not flash this card. Recovery copies: iPhone Media/{recovered} and {}",
@@ -160,13 +193,22 @@ where
     clean_stage(&afc, &snapshot, &source, &link)
         .context("Original file was written back, but read staging cleanup failed")?;
     fs::remove_dir_all(&journal).context("Cannot remove successful temporary recovery snapshot")?;
-    log(&format!("Read and restored {leaf}: {} bytes", bytes.len()));
+    log(&format!("Read and restored {leaf}: {} bytes in {:.2}s", bytes.len(), started.elapsed().as_secs_f32()));
     Ok(Some(bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_preview_does_not_connect_or_create_recovery_files() {
+        let cancelled = AtomicBool::new(true);
+        let result = read_system_file_with_preview("unused", ConnectionMode::Auto,
+            "/var/tmp", "unused.png", |_| panic!("No operation should start"),
+            |_| panic!("No preview should be produced"), Some(&cancelled)).unwrap();
+        assert!(result.is_none());
+    }
 
     #[test]
     fn relative_identifier_targets_correct_ios_path() {

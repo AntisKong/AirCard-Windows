@@ -1,4 +1,4 @@
-//! Keep Apple's CoreFP registry pointer present only for an AirTraffic write.
+//! Own a temporary CoreFP registry pointer for a write or an application session.
 //! The elevated half is this same executable, not a permanently installed service.
 
 use std::ffi::{c_void, OsStr};
@@ -284,7 +284,7 @@ fn corefp_dll() -> Result<PathBuf> {
 }
 
 pub struct WriteGuard {
-    helper: Option<TcpStream>,
+    pointer: SessionGuard,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -293,10 +293,35 @@ impl WriteGuard {
         let lock = WRITE_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        Ok(Self { pointer: SessionGuard::begin_locked()?, _lock: lock })
+    }
+
+    pub fn finish(self) -> Result<()> {
+        let Self { pointer, _lock } = self;
+        let result = pointer.finish();
+        drop(_lock);
+        result
+    }
+}
+
+pub struct SessionGuard {
+    helper: Option<TcpStream>,
+}
+
+impl SessionGuard {
+    pub fn begin() -> Result<Self> {
+        let _lock = WRITE_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        Self::begin_locked()
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        self.helper.is_some()
+    }
+
+    fn begin_locked() -> Result<Self> {
         if registry_path()?.is_some() {
             return Ok(Self {
                 helper: None,
-                _lock: lock,
             });
         }
         let dll = corefp_dll()?;
@@ -334,7 +359,6 @@ impl WriteGuard {
                     if status[0] == b'2' {
                         return Ok(Self {
                             helper: None,
-                            _lock: lock,
                         });
                     }
                     if status[0] != b'1' {
@@ -345,7 +369,6 @@ impl WriteGuard {
                     }
                     return Ok(Self {
                         helper: Some(stream),
-                        _lock: lock,
                     });
                 }
                 Ok(_) => {}
@@ -375,7 +398,7 @@ impl WriteGuard {
     }
 }
 
-impl Drop for WriteGuard {
+impl Drop for SessionGuard {
     fn drop(&mut self) {
         if let Some(stream) = self.helper.take() {
             let _ = stream.shutdown(Shutdown::Both);
@@ -469,5 +492,39 @@ mod tests {
         accepted.read_exact(&mut reply).unwrap();
         sender.join().unwrap();
         assert_eq!(reply, *b"1");
+    }
+
+    #[test]
+    fn session_guard_keeps_helper_alive_until_finish() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut helper, _) = listener.accept().unwrap();
+        let worker = std::thread::spawn(move || {
+            helper.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut byte = [0u8; 1];
+            assert_eq!(helper.read(&mut byte).unwrap(), 0);
+            helper.write_all(b"1").unwrap();
+        });
+        let guard = SessionGuard { helper: Some(client) };
+        assert!(guard.is_temporary());
+        guard.finish().unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn dropping_session_guard_notifies_helper_of_parent_exit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut helper, _) = listener.accept().unwrap();
+        helper.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        drop(SessionGuard { helper: Some(client) });
+        assert_eq!(helper.read(&mut [0u8; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn preexisting_pointer_does_not_have_a_cleanup_helper() {
+        let guard = SessionGuard { helper: None };
+        assert!(!guard.is_temporary());
+        guard.finish().unwrap();
     }
 }

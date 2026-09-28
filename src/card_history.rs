@@ -23,6 +23,8 @@ pub struct ArtVersion {
 pub struct PhoneRecord {
     pub udid: String,
     pub name: String,
+    #[serde(default)]
+    pub device_name: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -68,7 +70,7 @@ fn read_store() -> Result<HistoryStore> {
     if bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'[') {
         let cards = serde_json::from_slice::<Vec<CardRecord>>(&bytes)
             .context("Legacy card history is invalid; leaving it unchanged")?;
-        let phones = cards.iter().map(|card| PhoneRecord { udid: card.udid.clone(), name: String::new() })
+        let phones = cards.iter().map(|card| PhoneRecord { udid: card.udid.clone(), name: String::new(), device_name: String::new() })
             .fold(Vec::<PhoneRecord>::new(), |mut acc, phone| {
                 if !acc.iter().any(|saved| saved.udid == phone.udid) { acc.push(phone); }
                 acc
@@ -92,16 +94,39 @@ pub fn phones() -> Vec<PhoneRecord> {
     read_store().map(|store| store.phones).unwrap_or_default()
 }
 
+pub fn remember_device_names(devices: &[(String, String)]) -> Result<()> {
+    let mut store = read_store()?;
+    if update_device_names(&mut store, devices) { save_store(&store)?; }
+    Ok(())
+}
+
+fn update_device_names(store: &mut HistoryStore, devices: &[(String, String)]) -> bool {
+    let mut changed = false;
+    for phone in &mut store.phones {
+        if let Some((_, name)) = devices.iter().find(|(udid, name)| phone.udid.eq_ignore_ascii_case(udid) && !name.trim().is_empty()) {
+            if phone.device_name != name.trim() {
+                phone.device_name = name.trim().to_string();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn add_phone(udid: &str, name: &str) -> Result<()> {
     let udid = udid.trim();
     ensure!(!udid.is_empty() && udid.len() <= 128 && udid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "Invalid phone identifier");
     let mut store = read_store()?;
-    if let Some(phone) = store.phones.iter_mut().find(|phone| phone.udid == udid) {
-        phone.name = name.trim().to_string();
-    } else {
-        store.phones.push(PhoneRecord { udid: udid.to_string(), name: name.trim().to_string() });
-    }
+    set_phone_name(&mut store, udid, name.trim());
     save_store(&store)
+}
+
+fn set_phone_name(store: &mut HistoryStore, udid: &str, name: &str) {
+    if let Some(phone) = store.phones.iter_mut().find(|phone| phone.udid.eq_ignore_ascii_case(udid)) {
+        phone.name = name.to_string();
+    } else {
+        store.phones.push(PhoneRecord { udid: udid.to_string(), name: name.to_string(), device_name: String::new() });
+    }
 }
 
 pub fn add_card(udid: &str, hash: &str, name: &str) -> Result<()> {
@@ -114,7 +139,7 @@ pub fn add_card(udid: &str, hash: &str, name: &str) -> Result<()> {
         changed_at: 0, original_backed_up: false, baseline_from_prior_change: false, versions: Vec::new(),
     });
     if !store.phones.iter().any(|phone| phone.udid == udid) {
-        store.phones.push(PhoneRecord { udid: udid.to_string(), name: String::new() });
+        store.phones.push(PhoneRecord { udid: udid.to_string(), name: String::new(), device_name: String::new() });
     }
     save_store(&store)
 }
@@ -237,7 +262,7 @@ pub fn save_successful_change(udid: &str, hash: &str, device_hash: &str, name: &
         });
     }
     if !store.phones.iter().any(|phone| phone.udid == udid) {
-        store.phones.push(PhoneRecord { udid: udid.to_string(), name: String::new() });
+        store.phones.push(PhoneRecord { udid: udid.to_string(), name: String::new(), device_name: String::new() });
     }
     let token = crate::flasher::generate_token();
     let version_file = format!("version-{changed_at}-{token}.png");
@@ -314,5 +339,33 @@ mod tests {
     fn older_history_defaults_to_no_unverified_restore() {
         let record: CardRecord = serde_json::from_str(r#"{"udid":"phone","hash":"sqSXbSxN1AQs2S6BMjjFt8-EBnA=","name":"Card 1","changed_at":1}"#).unwrap();
         assert!(!record.original_backed_up);
+    }
+
+    #[test]
+    fn observed_device_names_preserve_aliases_and_do_not_create_phone_records() {
+        let mut store: HistoryStore = serde_json::from_str(r#"{"phones":[{"udid":"PHONE-A","name":"My phone"},{"udid":"PHONE-B","name":""}]}"#).unwrap();
+        let devices = vec![("phone-a".into(), "Vina".into()), ("phone-b".into(), "Other".into()), ("phone-c".into(), "New".into())];
+        assert!(update_device_names(&mut store, &devices));
+        assert!(!update_device_names(&mut store, &devices));
+        assert_eq!(store.phones.len(), 2);
+        assert_eq!(store.phones[0].name, "My phone");
+        assert_eq!(store.phones[0].device_name, "Vina");
+        assert!(store.phones[1].name.is_empty());
+        let decoded: HistoryStore = serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert_eq!(decoded.phones[1].device_name, "Other");
+    }
+
+    #[test]
+    fn phone_alias_updates_keep_identity_and_card_history() {
+        let mut store: HistoryStore = serde_json::from_str(r#"{"phones":[{"udid":"PHONE-A","name":"Vina"}],"cards":[{"udid":"PHONE-A","hash":"sqSXbSxN1AQs2S6BMjjFt8-EBnA=","name":"Transit","changed_at":1}]}"#).unwrap();
+        let cards = serde_json::to_value(&store.cards).unwrap();
+        set_phone_name(&mut store, "phone-a", "My phone");
+        assert_eq!(store.phones.len(), 1);
+        assert_eq!(store.phones[0].udid, "PHONE-A");
+        assert_eq!(store.phones[0].name, "My phone");
+        assert_eq!(serde_json::to_value(&store.cards).unwrap(), cards);
+        let decoded: HistoryStore = serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        assert_eq!(decoded.phones[0].name, "My phone");
+        assert_eq!(decoded.cards[0].udid, "PHONE-A");
     }
 }
