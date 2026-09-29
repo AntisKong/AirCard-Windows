@@ -6,6 +6,8 @@
 
 无需越狱、无需安装 iTunes。在 Windows 上修改 iPhone 钱包卡片的背景，并可恢复**首次成功读取并保存的卡面**。卡片和修改历史保存在程序旁的 `Data` 文件夹。
 
+[点击下载软件](https://github.com/AntisKong/AirCard-Windows/releases/latest/download/AirCard.zip)
+
 解压后运行 `aircard.exe`，`AppleSupport` 文件夹须与它同级。连接、解锁 iPhone 并信任电脑；电脑需要 [Apple Devices](https://support.apple.com/zh-cn/118290) 提供设备连接，无需安装 iTunes。
 
 在 **Artwork** 中选图并写入，在 **Cards** 中选择卡片和历史记录进行恢复。`ORIGIN` 指首次读取的卡面：如果在首次读取前已经改过卡面，它不一定是出厂原图。使用私有同步接口有风险，请先备份手机。检测到手机后，程序可能请求 UAC 权限，临时创建缺少的 `CoreFP\LibraryPath`，退出时撤销；已有值保持不变。当前卡面预览只保存在内存，提取期间的安全恢复副本暂存在 `Data/recovery`，成功写回手机后清理。
@@ -15,6 +17,8 @@
 ## English
 
 No jailbreak or iTunes installation required. Change iPhone Wallet card artwork on Windows and restore the **first successfully captured card face**. Card history stays in the `Data` folder beside the executable.
+
+[Click to download](https://github.com/AntisKong/AirCard-Windows/releases/latest/download/AirCard.zip)
 
 Extract the archive and run `aircard.exe` with `AppleSupport` beside it. Connect and unlock the iPhone, then trust the computer. [Apple Devices](https://support.apple.com/en-us/118290) is needed for connectivity; iTunes need not be installed. 
 
